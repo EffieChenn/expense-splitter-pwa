@@ -1,940 +1,1445 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
-import { 
-  CreditCard, 
-  User, 
-  Users, 
-  Heart, 
-  Check, 
-  X, 
-  Plus, 
-  PieChart as PieIcon, 
-  ArrowLeftRight, 
-  Settings,
-  Wallet,
-  FileText,
-  Calendar,
-  Trash2,
-  Loader,
-  Sparkles,
-  MessageSquareQuote,
-  Copy,
-  Wand2
-} from 'lucide-react';
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>情侶帳單分帳 App</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 React & ReactDOM -->
+    <script
+      crossorigin
+      src="https://unpkg.com/react@18/umd/react.production.min.js"
+    ></script>
+    <script
+      crossorigin
+      src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"
+    ></script>
+    <!-- 引入 Babel 用於解析 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- 修正: 顯式引入 Prop-Types，解決 Recharts 依賴問題 -->
+    <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+    <!-- 引入 Recharts -->
+    <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
 
-// --- Firebase Imports ---
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  signInWithCustomToken,
-  onAuthStateChanged
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  addDoc, 
-  query, 
-  onSnapshot, 
-  serverTimestamp, 
-  doc, 
-  deleteDoc,
-  orderBy
-} from 'firebase/firestore';
-
-// --- Constants & Config ---
-const PIE_COLORS = ['#FF9500', '#AF52DE', '#007AFF', '#FF2D55', '#5856D6', '#8E8E93', '#34C759'];
-const currentYear = new Date().getFullYear();
-
-// --- Gemini API Setup ---
-const apiKey = ""; // Run-time environment provides the key
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-
-// --- Helper Functions ---
-const classifyCategory = (merchant) => {
-    let cat = '其他';
-    const m = merchant;
-    if (m.includes('Uber') || m.includes('麥當勞') || m.includes('餐') || m.includes('食') || m.includes('飲料') || m.includes('路易莎') || m.includes('星巴克')) cat = '餐飲';
-    else if (m.includes('全聯') || m.includes('家樂福') || m.includes('寶雅') || m.includes('康是美') || m.includes('超市') || m.includes('屈臣氏')) cat = '居家';
-    else if (m.includes('客運') || m.includes('高鐵') || m.includes('車') || m.includes('加油') || m.includes('捷運') || m.includes('悠遊卡') || m.includes('Line Taxi')) cat = '交通';
-    else if (m.includes('Netflix') || m.includes('Spotify') || m.includes('好樂迪') || m.includes('電影') || m.includes('錢櫃') || m.includes('Steam')) cat = '娛樂';
-    else if (m.includes('Uniqlo') || m.includes('Zara') || m.includes('衣') || m.includes('服飾') || m.includes('鞋') || m.includes('GU')) cat = '購物';
-    return cat;
-};
-
-const callGemini = async (prompt) => {
-  try {
-    const response = await fetch(GEMINI_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
-    });
-
-    if (!response.ok) {
-        throw new Error(`API call failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "AI 暫時無法回應，請稍後再試。";
-  } catch (error) {
-    console.error("Gemini API Error:", error);
-    return "連線發生問題，無法產生內容。";
-  }
-};
-
-export default function ExpenseSplitterApp() {
-  const [activeTab, setActiveTab] = useState('swipe'); 
-  const [queue, setQueue] = useState([]); // Local queue for unsaved items
-  const [history, setHistory] = useState([]); // Synced from Firestore
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [showManualModal, setShowManualModal] = useState(false);
-  
-  const [manualForm, setManualForm] = useState({ merchant: '', amount: '', type: 'shared' });
-  const [rawInput, setRawInput] = useState(''); 
-  const [cardNameInput, setCardNameInput] = useState(''); 
-  const [chartView, setChartView] = useState('personal'); // 'personal' or 'shared'
-
-  // --- AI State ---
-  const [aiMessage, setAiMessage] = useState('');
-  const [isAiLoading, setIsAiLoading] = useState(false);
-  const [showAiModal, setShowAiModal] = useState(false);
-  const [aiInsight, setAiInsight] = useState('');
-  const [isInsightLoading, setIsInsightLoading] = useState(false);
-
-
-  // --- Firebase State ---
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [user, setUser] = useState(null);
-  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-  // --- Date Filter State ---
-  const today = new Date();
-  const currentMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
-  const [selectedMonthKey, setSelectedMonthKey] = useState(currentMonthKey);
-  const [availableMonths, setAvailableMonths] = useState([currentMonthKey]);
-
-  // --- 1. Initialize Firebase & Auth ---
-  useEffect(() => {
-    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-    if (!firebaseConfig?.apiKey) return;
-
-    const app = initializeApp(firebaseConfig);
-    const authInstance = getAuth(app);
-    const dbInstance = getFirestore(app);
-    
-    setAuth(authInstance);
-    setDb(dbInstance);
-
-    const initAuth = async () => {
-      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-        await signInWithCustomToken(authInstance, __initial_auth_token);
-      } else {
-        await signInAnonymously(authInstance);
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        background-color: #f2f2f7;
       }
-    };
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(authInstance, (u) => {
-      setUser(u);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- 2. Data Sync (Firestore -> History) ---
-  useEffect(() => {
-    if (!user || !db) return;
-
-    // 使用 order by date
-    const q = query(collection(db, 'artifacts', appId, 'users', user.uid, 'expenses'));
-    
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-
-      // Sort by date descending
-      docs.sort((a, b) => {
-          const dateA = new Date(a.date).getTime();
-          const dateB = new Date(b.date).getTime();
-          return dateB - dateA;
-      });
-
-      setHistory(docs);
-
-      const months = new Set(docs.map(d => d.monthKey));
-      if (!months.has(currentMonthKey)) months.add(currentMonthKey); 
-      setAvailableMonths(Array.from(months).sort().reverse());
-    }, (error) => {
-        console.error("Data sync error:", error);
-    });
-
-    return () => unsubscribe();
-  }, [user, db, appId, currentMonthKey]);
-
-  // --- Actions ---
-
-  const handleSwipe = async (item, type) => {
-    if (!user || !db) return;
-
-    const classifiedItem = {
-      ...item,
-      type,
-      monthKey: item.date.substring(0, 7).replace(/\//g, '-'), // YYYY-MM
-      timestamp: serverTimestamp(),
-      userId: user.uid
-    };
-
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'expenses'), classifiedItem);
-      setQueue(prev => prev.filter(i => i.id !== item.id));
-    } catch (e) {
-      console.error("Save error:", e);
-      // 使用模態框或彈出訊息取代 alert
-      // alert("儲存失敗，請檢查網路連線");
-    }
-  };
-
-  const handleDelete = async (itemId) => {
-      if (!user || !db) return;
-      // 實際應用中應使用客製化模態框取代 confirm
-      if (confirm('確定要刪除這筆紀錄嗎？')) {
-          try {
-            await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'expenses', itemId));
-          } catch (e) {
-            console.error("Delete error:", e);
-          }
+      /* 隱藏滾動條但保留功能 */
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
       }
-  };
-  
-  /**
-   * 複製文字到剪貼簿的修正函數。
-   * 使用 document.execCommand('copy') 來確保在 iframe 環境中的兼容性。
-   */
-  const copyToClipboard = (text) => {
-      // 創建一個臨時的 textarea 元素
-      const tempTextarea = document.createElement('textarea');
-      tempTextarea.value = text;
-      // 將 textarea 移到可視區域外，但必須在 DOM 中
-      tempTextarea.style.position = 'absolute';
-      tempTextarea.style.left = '-9999px';
-      document.body.appendChild(tempTextarea);
-
-      let copySuccess = false;
-      try {
-          tempTextarea.select();
-          copySuccess = document.execCommand('copy');
-      } catch (err) {
-          console.error('複製失敗:', err);
-      } finally {
-          // 清理 DOM
-          document.body.removeChild(tempTextarea);
+      .no-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
       }
+    </style>
 
-      if (copySuccess) {
-          // 實際應用中應使用客製化模態框取代 alert
-          alert('複製成功！趕快傳給他吧 ❤️'); 
-          setShowAiModal(false);
-      } else {
-          // 實際應用中應使用客製化模態框取代 alert
-          alert('複製失敗，可能是瀏覽器權限問題，請手動選取訊息內容。');
-      }
-  };
+    <!-- Firebase SDK 初始化 (Module) -->
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+      import {
+        getAuth,
+        signInAnonymously,
+        onAuthStateChanged,
+        signInWithCustomToken,
+      } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+      import {
+        getFirestore,
+        collection,
+        addDoc,
+        query,
+        onSnapshot,
+        serverTimestamp,
+        doc,
+        deleteDoc,
+        orderBy,
+        runTransaction,
+      } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-
-  // --- Gemini Features ---
-
-  const generateSettlementMessage = async () => {
-    setIsAiLoading(true);
-    setShowAiModal(true);
-    setAiMessage(''); // Clear previous
-
-    const halfShared = Math.round(summary.sharedTotal / 2);
-    const prompt = `
-      你是一位貼心的女友，要傳訊息給男友進行本月帳務結算。
-      請根據以下數據寫一段繁體中文訊息，語氣要**可愛、撒嬌、友善**，不要像討債公司。
-      可以加一些表情符號 (Emoji)。
-      
-      資料如下：
-      - 月份：${summary.monthLabel}
-      - 共同花費總金額：${summary.sharedTotal.toLocaleString()} 元 (所以一人分擔 ${halfShared.toLocaleString()} 元)
-      - 我幫你代墊的個人花費：${summary.forHimTotal.toLocaleString()} 元
-      - **男友總共需要轉給我**：${summary.bfOwes.toLocaleString()} 元
-
-      結構建議：
-      1. 開頭先撒嬌一下。
-      2. 列出清晰的算式 (共同的一半 + 代墊 = 總額)。
-      3. 最後給一個付款的 Call to Action (例如：再麻煩寶貝轉帳囉~)。
-    `;
-
-    const result = await callGemini(prompt);
-    setAiMessage(result);
-    setIsAiLoading(false);
-  };
-
-  const generateInsight = async () => {
-    setIsInsightLoading(true);
-    setAiInsight(''); // Clear previous
-
-    // Prepare data for AI
-    const topCategories = chartData.sort((a, b) => b.value - a.value).slice(0, 3);
-    const dataStr = topCategories.map(c => `${c.name}: $${c.value}`).join(', ');
-    const total = chartView === 'personal' ? summary.personalTotal : summary.sharedTotal;
-
-    const prompt = `
-      請根據這個月的消費數據，給出一句**幽默、毒舌但中肯**的短評 (50字以內)。
-      對象：${chartView === 'personal' ? '我個人' : '我們情侶倆'}
-      月份：${selectedMonthKey}
-      總花費：${total}
-      前三大花費類別：${dataStr}
-
-      請用繁體中文。如果是餐飲多，可以笑我們太會吃；如果是購物多，可以笑要剁手了。
-    `;
-
-    const result = await callGemini(prompt);
-    setAiInsight(result);
-    setIsInsightLoading(false);
-  };
-
-  // --- Parsing Logic (Smart Deductions) ---
-  const parseBillText = () => {
-    const lines = rawInput.split('\n');
-    let rawItems = [];
-    const finalCardName = cardNameInput.trim() || '匯入帳單'; 
-
-    lines.forEach((line, idx) => {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) return;
-
-      let match = null;
-      let date = '';
-      let merchant = '';
-      let amount = 0;
-      let cardName = finalCardName;
-
-      // Regex patterns (same as before)
-      const regexTypeA = /^(\d{2}\/\d{2})\s+\d{2}\/\d{2}\s+(.+?)\s+(-?[\d,]+)\s+\d{4}\s+TW\s+TWD$/;
-      const regexTypeB = /^(\d{3}\/\d{2}\/\d{2})\s+(.*?)\s+(?:\d{3}\/\d{2}\/\d{2})\s+TWD\s+([-\d,]+)$/;
-      const regexTypeC = /^(\d{3}\/\d{2}\/\d{2})\s+\d{3}\/\d{2}\/\d{2}\s+(.+?)\s+([-\d,]+)\s+TW$/;
-      const regexCSV = /^([\d\/-]+)[,，](.+?)[,，]([-\d,]+).*$/;
-
-      if ((match = trimmedLine.match(regexTypeA))) {
-        date = `${currentYear}/${match[1]}`;
-        merchant = match[2].trim();
-        amount = parseFloat(match[3].replace(/,/g, ''));
-      } else if ((match = trimmedLine.match(regexTypeB))) {
-        const [y, m, d] = match[1].split('/');
-        date = `${parseInt(y) + 1911}/${m}/${d}`;
-        merchant = match[2].trim();
-        amount = parseFloat(match[3].replace(/,/g, ''));
-      } else if ((match = trimmedLine.match(regexTypeC))) {
-        const [y, m, d] = match[1].split('/');
-        date = `${parseInt(y) + 1911}/${m}/${d}`;
-        merchant = match[2].trim();
-        amount = parseFloat(match[3].replace(/,/g, ''));
-      } else if ((match = trimmedLine.match(regexCSV))) {
-        date = match[1].replace(/-/g, '/');
-        merchant = match[2];
-        amount = parseFloat(match[3].replace(/,/g, ''));
-      }
-
-      if (!isNaN(amount) && amount !== 0) {
-        if (!merchant.includes('本筆分期') && !merchant.includes('總費用年百分率')) {
-           rawItems.push({
-            id: Date.now() + idx + Math.random(),
-            date,
-            merchant,
-            amount,
-            card: cardName,
-            category: classifyCategory(merchant)
-          });
-        }
-      }
-    });
-
-    // --- Deduplication & Deduction Logic ---
-    const mergedItems = [];
-    const usedOffsetIds = new Set();
-    
-    const positiveItems = rawItems.filter(i => i.amount > 0);
-    const negativeItems = rawItems.filter(i => i.amount < 0);
-
-    positiveItems.forEach(item => {
-      let finalAmount = item.amount;
-      let totalDeduction = 0;
-      let matched = false;
-
-      negativeItems.forEach(offset => {
-        if (usedOffsetIds.has(offset.id)) return;
-        
-        const isOffsetType = offset.merchant.includes('折抵') || offset.merchant.includes('點數') || offset.merchant.includes('回饋');
-        if (!isOffsetType) return;
-
-        const cleanItemName = item.merchant.replace(/連加\*/g, '').replace(/\(.*\)/g, '').trim();
-        const cleanOffsetName = offset.merchant.replace(/點數折抵_?/g, '').replace(/折抵/g, '').replace(/連加\*/g, '').trim();
-        
-        const isNameMatch = (cleanItemName.includes(cleanOffsetName) || cleanOffsetName.includes(cleanItemName)) && cleanOffsetName.length > 2;
-
-        if (isNameMatch) {
-           if (Math.abs(offset.amount) <= item.amount) {
-             finalAmount += offset.amount; 
-             totalDeduction += Math.abs(offset.amount);
-             usedOffsetIds.add(offset.id);
-             matched = true;
-           }
-        }
-      });
-
-      const note = matched ? ` (已扣除折抵 $${totalDeduction})` : '';
-      
-      if (finalAmount > 0) {
-        mergedItems.push({
-          ...item,
-          amount: finalAmount, 
-          merchant: item.merchant + note,
-          originalAmount: item.amount
-        });
-      }
-    });
-
-    negativeItems.forEach(offset => {
-      if (!usedOffsetIds.has(offset.id)) {
-        mergedItems.push(offset);
-      }
-    });
-
-    if (mergedItems.length > 0) {
-      setQueue(prev => [...prev, ...mergedItems]);
-      setRawInput('');
-      setCardNameInput(''); 
-      setShowImportModal(false);
-    } else {
-      // 實際應用中應使用客製化模態框取代 alert
-      // alert("無法識別內容，或所有項目皆被折抵完畢。");
-    }
-  };
-
-  const handleAddManual = async () => {
-      if (!manualForm.merchant || !manualForm.amount) return;
-      const date = new Date().toISOString().split('T')[0].replace(/-/g, '/');
-      const item = {
-          id: Date.now(),
-          date,
-          merchant: manualForm.merchant,
-          amount: parseFloat(manualForm.amount),
-          category: classifyCategory(manualForm.merchant),
-          card: '現金/手動'
+      // 將 Firebase 函式掛載到 window 以便 Babel 腳本使用
+      window.FirebaseServices = {
+        initializeApp,
+        getAuth,
+        signInAnonymously,
+        onAuthStateChanged,
+        signInWithCustomToken,
+        getFirestore,
+        collection,
+        addDoc,
+        query,
+        onSnapshot,
+        serverTimestamp,
+        doc,
+        deleteDoc,
+        orderBy,
+        runTransaction,
       };
-      await handleSwipe(item, manualForm.type);
-      setShowManualModal(false);
-      setManualForm({ merchant: '', amount: '', type: 'shared' });
-  };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
 
-  // --- Derived Data ---
+    <script type="text/babel">
+      // ==========================================
+      // 1. 設定區域 (請在此填入您的資料)
+      // ==========================================
 
-  const monthlyHistory = useMemo(() => {
-      return history.filter(item => item.monthKey === selectedMonthKey);
-  }, [history, selectedMonthKey]);
+      // 您的 Firebase Config
+      const FIREBASE_CONFIG = {
+        apiKey: "AIzaSyCYYWwtVnJ4Duo4R6TeV5z6oYGS-2_2Ug8",
+        authDomain: "expense-splitter-pwa.firebaseapp.com",
+        projectId: "expense-splitter-pwa",
+        storageBucket: "expense-splitter-pwa.firebasestorage.app",
+        messagingSenderId: "355640730128",
+        appId: "1:355640730128:web:b8a64a1a35f7957b05a095",
+      };
 
-  const summary = useMemo(() => {
-    let personalTotal = 0;
-    let sharedTotal = 0;
-    let forHimTotal = 0;
+      // 您的 Gemini API Key
+      const GEMINI_API_KEY = "AIzaSyCk1bHPtjg2DX_n3J_JLgTZy_tdC0dK26E"; // <-- 請替換
 
-    monthlyHistory.forEach(item => {
-      if (item.type === 'personal') personalTotal += item.amount;
-      if (item.type === 'shared') sharedTotal += item.amount;
-      if (item.type === 'for_him') forHimTotal += item.amount;
-    });
+      // App ID (用於資料庫路徑隔離，可保持不變)
+      const APP_NAMESPACE_ID = "standalone-couple-expense-app";
 
-    return {
-      personalTotal,
-      sharedTotal,
-      forHimTotal,
-      bfOwes: Math.round((sharedTotal / 2) + forHimTotal),
-      myShare: Math.round((sharedTotal / 2) + personalTotal),
-      monthLabel: selectedMonthKey
-    };
-  }, [monthlyHistory, selectedMonthKey]);
-
-  const chartData = useMemo(() => {
-      const targetType = chartView === 'personal' ? 'personal' : 'shared';
-      const dataMap = {};
-      
-      monthlyHistory.filter(i => i.type === targetType).forEach(item => {
-          const cat = item.category || '其他';
-          dataMap[cat] = (dataMap[cat] || 0) + item.amount;
-      });
-
-      return Object.keys(dataMap).map(key => ({ name: key, value: dataMap[key] }));
-  }, [monthlyHistory, chartView]);
-
-  // --- Components ---
-
-  const MonthSelector = () => (
-      <div className="flex items-center justify-center space-x-2 bg-white px-4 py-2 rounded-full shadow-sm mb-4">
-          <Calendar size={16} className="text-gray-500"/>
-          <select 
-            value={selectedMonthKey}
-            onChange={(e) => {
-              setSelectedMonthKey(e.target.value);
-              setAiInsight(''); // Reset insight on month change
-            }}
-            className="bg-transparent text-sm font-bold text-gray-700 focus:outline-none"
-          >
-              {availableMonths.map(m => (
-                  <option key={m} value={m}>{m}</option>
-              ))}
-          </select>
-      </div>
-  );
-
-  const TabButton = ({ id, icon: Icon, label }) => (
-    <button 
-      onClick={() => setActiveTab(id)}
-      className={`flex flex-col items-center justify-center w-full py-2 transition-colors ${activeTab === id ? 'text-blue-500' : 'text-gray-400'}`}
-    >
-      <Icon size={24} />
-      <span className="text-[10px] mt-1 font-medium">{label}</span>
-    </button>
-  );
-
-  if (!user) {
-      return (
-          <div className="flex flex-col h-screen w-full items-center justify-center bg-gray-50">
-              <Loader className="animate-spin text-blue-500 mb-2" />
-              <p className="text-gray-500 text-sm">正在連線至資料庫...</p>
-          </div>
+      // ==========================================
+      // 2. 圖示元件 (Inline SVG - 確保穩定性)
+      // ==========================================
+      const IconBase = ({ children, className = "", ...props }) => (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={className}
+          {...props}
+        >
+          {children}
+        </svg>
       );
-  }
 
-  return (
-    <div className="flex flex-col h-screen w-full max-w-md mx-auto bg-[#F2F2F7] overflow-hidden font-sans text-slate-900 relative">
-      
-      {/* Navbar */}
-      <div className="bg-white/80 backdrop-blur-md border-b border-gray-200 pt-10 pb-3 px-4 flex justify-between items-center z-20 sticky top-0">
-        <h1 className="text-xl font-bold">
-          {activeTab === 'swipe' && '帳單分類'}
-          {activeTab === 'summary' && '結算明細'}
-          {activeTab === 'analysis' && '花費分析'}
-        </h1>
-        <div className="flex gap-3">
-          {activeTab === 'swipe' && (
-            <>
-               <button onClick={() => setShowImportModal(true)} className="text-blue-500 flex items-center gap-1">
-                <FileText size={20} />
-                <span className="text-sm font-medium">匯入</span>
-              </button>
-              <button onClick={() => setShowManualModal(true)} className="text-blue-500">
-                <Plus size={24} />
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+      const CreditCard = (props) => (
+        <IconBase {...props}>
+          <rect width="20" height="14" x="2" y="5" rx="2" />
+          <line x1="2" x2="22" y1="10" y2="10" />
+        </IconBase>
+      );
+      const User = (props) => (
+        <IconBase {...props}>
+          <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </IconBase>
+      );
+      const Users = (props) => (
+        <IconBase {...props}>
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        </IconBase>
+      );
+      const Heart = (props) => (
+        <IconBase {...props}>
+          <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+        </IconBase>
+      );
+      const Check = (props) => (
+        <IconBase {...props}>
+          <polyline points="20 6 9 17 4 12" />
+        </IconBase>
+      );
+      const X = (props) => (
+        <IconBase {...props}>
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </IconBase>
+      );
+      const Plus = (props) => (
+        <IconBase {...props}>
+          <path d="M5 12h14" />
+          <path d="M12 5v14" />
+        </IconBase>
+      );
+      const PieIcon = (props) => (
+        <IconBase {...props}>
+          <path d="M21.21 15.89A10 10 0 1 1 8 2.83" />
+          <path d="M22 12A10 10 0 0 0 12 2v10z" />
+        </IconBase>
+      );
+      const ArrowLeftRight = (props) => (
+        <IconBase {...props}>
+          <path d="M8 3 4 7l4 4" />
+          <path d="M4 7h16" />
+          <path d="m16 21 4-4-4-4" />
+          <path d="M20 17H4" />
+        </IconBase>
+      );
+      const Settings = (props) => (
+        <IconBase {...props}>
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          <circle cx="12" cy="12" r="3" />
+        </IconBase>
+      );
+      const Wallet = (props) => (
+        <IconBase {...props}>
+          <path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h18a2 2 0 0 1 0 4h-5m-9 3a2 2 0 0 0 0 4h14a2 2 0 0 0 0-4h-2M8 12h.01" />
+        </IconBase>
+      );
+      const FileText = (props) => (
+        <IconBase {...props}>
+          <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+          <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+          <path d="M10 9H8" />
+          <path d="M16 13H8" />
+          <path d="M16 17H8" />
+        </IconBase>
+      );
+      const Calendar = (props) => (
+        <IconBase {...props}>
+          <path d="M8 2v4" />
+          <path d="M16 2v4" />
+          <rect width="18" height="18" x="3" y="4" rx="2" />
+          <path d="M3 10h18" />
+        </IconBase>
+      );
+      const Trash2 = (props) => (
+        <IconBase {...props}>
+          <path d="M3 6h18" />
+          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+          <line x1="10" x2="10" y1="11" y2="17" />
+          <line x1="14" x2="14" y1="11" y2="17" />
+        </IconBase>
+      );
+      const Loader = (props) => (
+        <IconBase {...props}>
+          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+        </IconBase>
+      );
+      const Sparkles = (props) => (
+        <IconBase {...props}>
+          <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+          <path d="M5 3v4" />
+          <path d="M9 3v4" />
+          <path d="M3 7h4" />
+          <path d="M3 5h4" />
+        </IconBase>
+      );
+      const MessageSquareQuote = (props) => (
+        <IconBase {...props}>
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          <path d="M8 12a2 2 0 0 0 2-2V8H8" />
+          <path d="M14 12a2 2 0 0 0 2-2V8h-2" />
+        </IconBase>
+      );
+      const Copy = (props) => (
+        <IconBase {...props}>
+          <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+        </IconBase>
+      );
+      const Wand2 = (props) => (
+        <IconBase {...props}>
+          <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
+          <path d="m14 7 3 3" />
+          <path d="M5 6v4" />
+          <path d="M19 14v4" />
+          <path d="M10 2v2" />
+          <path d="M7 8H3" />
+          <path d="M21 16h-4" />
+          <path d="M11 3H9" />
+        </IconBase>
+      );
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden relative p-4">
-        
-        {/* SWIPE TAB */}
-        {activeTab === 'swipe' && (
-          <div className="h-full flex flex-col items-center justify-center -mt-4">
-            {queue.length > 0 ? (
-              <div className="w-full max-w-xs relative h-[420px]">
-                <div className="absolute top-4 left-4 w-full h-full bg-white rounded-3xl shadow-sm border border-gray-200 opacity-50 transform scale-95 translate-y-2"></div>
+      // ==========================================
+      // 3. 應用程式邏輯 (React App)
+      // ==========================================
+
+      const { useState, useMemo, useEffect } = React;
+
+      // 修正 2: 這裡不再解構 Recharts 的組件，因為它可能在 Babel 執行時還未完全就緒。
+      // 我們將 Recharts 的組件變數定義移到組件內部或確保它是全域可用。
+      const RechartsComponents = window.Recharts || {};
+      const { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } =
+        RechartsComponents;
+
+      // 從 window 獲取 Firebase 模組
+      const {
+        initializeApp,
+        getAuth,
+        signInAnonymously,
+        onAuthStateChanged,
+        getFirestore,
+        collection,
+        addDoc,
+        query,
+        onSnapshot,
+        serverTimestamp,
+        doc,
+        deleteDoc,
+        orderBy,
+        runTransaction,
+      } = window.FirebaseServices;
+
+      const PIE_COLORS = [
+        "#FF9500",
+        "#AF52DE",
+        "#007AFF",
+        "#FF2D55",
+        "#5856D6",
+        "#8E8E93",
+        "#34C759",
+      ];
+      const currentYear = new Date().getFullYear();
+      // 這裡需要確保在 React 內部使用時 key 是已經填寫的
+      // 我們將 URL 建構移到 callGemini 內部
+
+      const classifyCategory = (merchant) => {
+        let cat = "其他";
+        const m = merchant;
+        if (
+          m.includes("Uber") ||
+          m.includes("麥當勞") ||
+          m.includes("餐") ||
+          m.includes("食") ||
+          m.includes("飲料") ||
+          m.includes("路易莎") ||
+          m.includes("星巴克")
+        )
+          cat = "餐飲";
+        else if (
+          m.includes("全聯") ||
+          m.includes("家樂福") ||
+          m.includes("寶雅") ||
+          m.includes("康是美") ||
+          m.includes("超市") ||
+          m.includes("屈臣氏")
+        )
+          cat = "居家";
+        else if (
+          m.includes("客運") ||
+          m.includes("高鐵") ||
+          m.includes("車") ||
+          m.includes("加油") ||
+          m.includes("捷運") ||
+          m.includes("悠遊卡") ||
+          m.includes("Line Taxi")
+        )
+          cat = "交通";
+        else if (
+          m.includes("Netflix") ||
+          m.includes("Spotify") ||
+          m.includes("好樂迪") ||
+          m.includes("電影") ||
+          m.includes("錢櫃") ||
+          m.includes("Steam")
+        )
+          cat = "娛樂";
+        else if (
+          m.includes("Uniqlo") ||
+          m.includes("Zara") ||
+          m.includes("衣") ||
+          m.includes("服飾") ||
+          m.includes("鞋") ||
+          m.includes("GU")
+        )
+          cat = "購物";
+        return cat;
+      };
+
+      const callGemini = async (prompt) => {
+        if (!GEMINI_API_KEY || GEMINI_API_KEY === "YOUR_GEMINI_API_KEY") {
+          return "錯誤：請先在 index.html 程式碼中填入您的 GEMINI_API_KEY。";
+        }
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+
+        try {
+          const response = await fetch(GEMINI_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+          });
+
+          if (!response.ok)
+            throw new Error(`API call failed: ${response.status}`);
+          const data = await response.json();
+          return (
+            data.candidates?.[0]?.content?.parts?.[0]?.text ||
+            "AI 暫時無法回應，請稍後再試。"
+          );
+        } catch (error) {
+          console.error("Gemini API Error:", error);
+          return "連線發生問題，無法產生內容。";
+        }
+      };
+
+      function ExpenseSplitterApp() {
+        // 確認 Recharts 元件是否可用
+        const isRechartsReady = !!PieChart;
+
+        const [activeTab, setActiveTab] = useState("swipe");
+        const [queue, setQueue] = useState([]);
+        const [history, setHistory] = useState([]);
+        const [showImportModal, setShowImportModal] = useState(false);
+        const [showManualModal, setShowManualModal] = useState(false);
+
+        const [manualForm, setManualForm] = useState({
+          merchant: "",
+          amount: "",
+          type: "shared",
+        });
+        const [rawInput, setRawInput] = useState("");
+        const [cardNameInput, setCardNameInput] = useState("");
+        const [chartView, setChartView] = useState("personal");
+
+        // --- AI State ---
+        const [aiMessage, setAiMessage] = useState("");
+        const [isAiLoading, setIsAiLoading] = useState(false);
+        const [showAiModal, setShowAiModal] = useState(false);
+        const [aiInsight, setAiInsight] = useState("");
+        const [isInsightLoading, setIsInsightLoading] = useState(false);
+
+        // --- Firebase State ---
+        const [db, setDb] = useState(null);
+        const [auth, setAuth] = useState(null);
+        const [user, setUser] = useState(null);
+        const appId = APP_NAMESPACE_ID;
+
+        // --- Date Filter State ---
+        const today = new Date();
+        const currentMonthKey = `${today.getFullYear()}-${String(
+          today.getMonth() + 1
+        ).padStart(2, "0")}`;
+        const [selectedMonthKey, setSelectedMonthKey] =
+          useState(currentMonthKey);
+        const [availableMonths, setAvailableMonths] = useState([
+          currentMonthKey,
+        ]);
+
+        // --- 1. Initialize Firebase & Auth ---
+        useEffect(() => {
+          if (
+            !FIREBASE_CONFIG.apiKey ||
+            FIREBASE_CONFIG.apiKey === "YOUR_FIREBASE_API_KEY"
+          ) {
+            alert("請先在 index.html 程式碼中填寫 FIREBASE_CONFIG！");
+            return;
+          }
+
+          try {
+            const app = initializeApp(FIREBASE_CONFIG);
+            const authInstance = getAuth(app);
+            const dbInstance = getFirestore(app);
+
+            setAuth(authInstance);
+            setDb(dbInstance);
+
+            const initAuth = async () => {
+              await signInAnonymously(authInstance);
+            };
+            initAuth();
+
+            const unsubscribe = onAuthStateChanged(authInstance, (u) => {
+              setUser(u);
+            });
+            return () => unsubscribe();
+          } catch (e) {
+            console.error("Firebase Init Error:", e);
+            alert("Firebase 初始化失敗，請檢查 Config");
+          }
+        }, []);
+
+        // --- 2. Data Sync (Firestore -> History) ---
+        useEffect(() => {
+          if (!user || !db) return;
+
+          // 為了簡單起見，在獨立 App 中我們使用 users/{uid}/expenses
+          // 這樣可以確保資料是跟著使用者的 (匿名登入下，若清除 cookies 可能會遺失，建議實作登入，但這裡先保持匿名)
+          const q = query(
+            collection(db, "artifacts", appId, "users", user.uid, "expenses")
+          );
+
+          const unsubscribe = onSnapshot(
+            q,
+            (snapshot) => {
+              const docs = snapshot.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data(),
+              }));
+
+              docs.sort((a, b) => {
+                const dateA = new Date(a.date).getTime();
+                const dateB = new Date(b.date).getTime();
+                return dateB - dateA;
+              });
+
+              setHistory(docs);
+
+              const months = new Set(
+                docs.map((d) => d.monthKey).filter(Boolean)
+              );
+              if (!months.has(currentMonthKey)) months.add(currentMonthKey);
+              setAvailableMonths(Array.from(months).sort().reverse());
+            },
+            (error) => {
+              console.error("Data sync error:", error);
+            }
+          );
+
+          return () => unsubscribe();
+        }, [user, db, appId, currentMonthKey]);
+
+        // --- Actions ---
+        const handleSwipe = async (item, type) => {
+          if (!user || !db) return;
+
+          const classifiedItem = {
+            ...item,
+            type,
+            monthKey: item.date.substring(0, 7).replace(/\//g, "-"), // YYYY-MM
+            timestamp: serverTimestamp(),
+            userId: user.uid,
+          };
+
+          try {
+            await addDoc(
+              collection(db, "artifacts", appId, "users", user.uid, "expenses"),
+              classifiedItem
+            );
+            setQueue((prev) => prev.filter((i) => i.id !== item.id));
+          } catch (e) {
+            console.error("Save error:", e);
+            alert("儲存失敗，請檢查網路連線");
+          }
+        };
+
+        const handleDelete = async (itemId) => {
+          if (!user || !db) return;
+          // 使用自定義的 modal 替換 confirm()
+          if (window.confirm("確定要刪除這筆紀錄嗎？")) {
+            try {
+              await deleteDoc(
+                doc(
+                  db,
+                  "artifacts",
+                  appId,
+                  "users",
+                  user.uid,
+                  "expenses",
+                  itemId
+                )
+              );
+            } catch (e) {
+              console.error("Delete error:", e);
+            }
+          }
+        };
+
+        const copyToClipboard = (text) => {
+          const tempTextarea = document.createElement("textarea");
+          tempTextarea.value = text;
+          tempTextarea.style.position = "absolute";
+          tempTextarea.style.left = "-9999px";
+          document.body.appendChild(tempTextarea);
+
+          let copySuccess = false;
+          try {
+            tempTextarea.select();
+            // navigator.clipboard.writeText is preferred, but execCommand is safer in some iFrame environments
+            copySuccess = document.execCommand("copy");
+          } catch (err) {
+            console.error("複製失敗:", err);
+          } finally {
+            document.body.removeChild(tempTextarea);
+          }
+
+          if (copySuccess) {
+            // 使用自定義 modal/message 替換 alert()
+            alert("複製成功！趕快傳給他吧 ❤️");
+            setShowAiModal(false);
+          } else {
+            alert("複製失敗，可能是瀏覽器權限問題，請手動選取訊息內容。");
+          }
+        };
+
+        // --- Gemini Features ---
+        const generateSettlementMessage = async () => {
+          setIsAiLoading(true);
+          setShowAiModal(true);
+          setAiMessage("");
+
+          const halfShared = Math.round(summary.sharedTotal / 2);
+          const prompt = `
+                你是一位貼心的女友，要傳訊息給男友進行本月帳務結算。
+                請根據以下數據寫一段繁體中文訊息，語氣要**可愛、撒嬌、友善**，不要像討債公司。
+                可以加一些表情符號 (Emoji)。
                 
-                <div className="absolute top-0 left-0 w-full h-full bg-white rounded-3xl shadow-xl border border-gray-100 flex flex-col items-center justify-between p-6 z-10 transition-all duration-300">
-                  <div className="w-full flex justify-between items-center text-gray-400 text-sm font-medium uppercase tracking-wider">
-                    <span>{queue[0].card}</span>
-                    <span>{queue[0].date}</span>
+                資料如下：
+                - 月份：${summary.monthLabel}
+                - 共同花費總金額：${summary.sharedTotal.toLocaleString()} 元 (所以一人分擔 ${halfShared.toLocaleString()} 元)
+                - 我幫你代墊的個人花費：${summary.forHimTotal.toLocaleString()} 元
+                - **男友總共需要轉給我**：${summary.bfOwes.toLocaleString()} 元
+
+                結構建議：
+                1. 開頭先撒嬌一下。
+                2. 列出清晰的算式 (共同的一半 + 代墊 = 總額)。
+                3. 最後給一個付款的 Call to Action (例如：再麻煩寶貝轉帳囉~)。
+                `;
+
+          const result = await callGemini(prompt);
+          setAiMessage(result);
+          setIsAiLoading(false);
+        };
+
+        const generateInsight = async () => {
+          setIsInsightLoading(true);
+          setAiInsight("");
+
+          const topCategories = chartData
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 3);
+          const dataStr = topCategories
+            .map((c) => `${c.name}: $${c.value}`)
+            .join(", ");
+          const total =
+            chartView === "personal"
+              ? summary.personalTotal
+              : summary.sharedTotal;
+
+          const prompt = `
+                請根據這個月的消費數據，給出一句**幽默、毒舌但中肯**的短評 (50字以內)。
+                對象：${chartView === "personal" ? "我個人" : "我們情侶倆"}
+                月份：${selectedMonthKey}
+                總花費：${total.toLocaleString()}
+                前三大花費類別：${dataStr}
+
+                請用繁體中文。如果是餐飲多，可以笑我們太會吃；如果是購物多，可以笑要剁手了。
+                `;
+
+          const result = await callGemini(prompt);
+          setAiInsight(result);
+          setIsInsightLoading(false);
+        };
+
+        // --- Parsing Logic ---
+        const parseBillText = () => {
+          const lines = rawInput.split("\n");
+          let rawItems = [];
+          const finalCardName = cardNameInput.trim() || "匯入帳單";
+
+          lines.forEach((line, idx) => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) return;
+
+            let match = null;
+            let date = "";
+            let merchant = "";
+            let amount = 0;
+            let cardName = finalCardName;
+
+            // 台灣信用卡/網銀常見格式
+            const regexTypeA =
+              /^(\d{2}\/\d{2})\s+\d{2}\/\d{2}\s+(.+?)\s+(-?[\d,]+)\s+\d{4}\s+TW\s+TWD$/;
+            const regexTypeB =
+              /^(\d{3}\/\d{2}\/\d{2})\s+(.*?)\s+(?:\d{3}\/\d{2}\/\d{2})\s+TWD\s+([-\d,]+)$/; // 民國年
+            const regexTypeC =
+              /^(\d{3}\/\d{2}\/\d{2})\s+\d{3}\/\d{2}\/\d{2}\s+(.+?)\s+([-\d,]+)\s+TW$/; // 民國年
+            const regexCSV = /^([\d\/-]+)[,，](.+?)[,，]([-\d,]+).*$/;
+
+            if ((match = trimmedLine.match(regexTypeA))) {
+              date = `${currentYear}/${match[1]}`;
+              merchant = match[2].trim();
+              amount = parseFloat(match[3].replace(/,/g, ""));
+            } else if ((match = trimmedLine.match(regexTypeB))) {
+              const [y, m, d] = match[1].split("/");
+              date = `${parseInt(y) + 1911}/${m}/${d}`; // 民國年轉西元年
+              merchant = match[2].trim();
+              amount = parseFloat(match[3].replace(/,/g, ""));
+            } else if ((match = trimmedLine.match(regexTypeC))) {
+              const [y, m, d] = match[1].split("/");
+              date = `${parseInt(y) + 1911}/${m}/${d}`; // 民國年轉西元年
+              merchant = match[2].trim();
+              amount = parseFloat(match[3].replace(/,/g, ""));
+            } else if ((match = trimmedLine.match(regexCSV))) {
+              date = match[1].replace(/-/g, "/");
+              merchant = match[2];
+              amount = parseFloat(match[3].replace(/,/g, ""));
+            }
+
+            if (!isNaN(amount) && amount !== 0) {
+              // 排除分期、年百分率等非實際消費項目
+              if (
+                !merchant.includes("本筆分期") &&
+                !merchant.includes("總費用年百分率")
+              ) {
+                rawItems.push({
+                  id: Date.now() + idx + Math.random(),
+                  date,
+                  merchant,
+                  amount,
+                  card: cardName,
+                  category: classifyCategory(merchant),
+                });
+              }
+            }
+          });
+
+          // Deduplication Logic (合併折抵)
+          const mergedItems = [];
+          const usedOffsetIds = new Set();
+          const positiveItems = rawItems.filter((i) => i.amount > 0);
+          const negativeItems = rawItems.filter((i) => i.amount < 0);
+
+          positiveItems.forEach((item) => {
+            let finalAmount = item.amount;
+            let totalDeduction = 0;
+            let matched = false;
+
+            negativeItems.forEach((offset) => {
+              if (usedOffsetIds.has(offset.id)) return;
+              const isOffsetType =
+                offset.merchant.includes("折抵") ||
+                offset.merchant.includes("點數") ||
+                offset.merchant.includes("回饋");
+              if (!isOffsetType) return;
+
+              // 簡易名稱比對
+              const cleanItemName = item.merchant
+                .replace(/連加\*/g, "")
+                .replace(/\(.*\)/g, "")
+                .trim();
+              const cleanOffsetName = offset.merchant
+                .replace(/點數折抵_?/g, "")
+                .replace(/折抵/g, "")
+                .replace(/連加\*/g, "")
+                .trim();
+              const isNameMatch =
+                (cleanItemName.includes(cleanOffsetName) ||
+                  cleanOffsetName.includes(cleanItemName)) &&
+                cleanOffsetName.length > 2;
+
+              if (isNameMatch) {
+                if (Math.abs(offset.amount) <= item.amount) {
+                  finalAmount += offset.amount; // offset amount is negative, so this subtracts
+                  totalDeduction += Math.abs(offset.amount);
+                  usedOffsetIds.add(offset.id);
+                  matched = true;
+                }
+              }
+            });
+
+            const note = matched
+              ? ` (已扣除折抵 $${totalDeduction.toLocaleString()})`
+              : "";
+            if (finalAmount > 0) {
+              mergedItems.push({
+                ...item,
+                amount: finalAmount,
+                merchant: item.merchant + note,
+                originalAmount: item.amount, // 保持原始金額，以供參考
+              });
+            }
+          });
+
+          // 加入未匹配的負項 (如果有的話)
+          negativeItems.forEach((offset) => {
+            if (!usedOffsetIds.has(offset.id)) {
+              mergedItems.push(offset);
+            }
+          });
+
+          if (mergedItems.length > 0) {
+            setQueue((prev) => [...prev, ...mergedItems]);
+            setRawInput("");
+            setCardNameInput("");
+            setShowImportModal(false);
+          } else {
+            alert("無法識別內容，或所有項目皆被折抵完畢。");
+          }
+        };
+
+        const handleAddManual = async () => {
+          if (
+            !manualForm.merchant ||
+            !manualForm.amount ||
+            isNaN(parseFloat(manualForm.amount))
+          ) {
+            alert("請輸入有效的項目名稱和金額。");
+            return;
+          }
+          const date = new Date()
+            .toISOString()
+            .split("T")[0]
+            .replace(/-/g, "/");
+          const item = {
+            id: Date.now(),
+            date,
+            merchant: manualForm.merchant,
+            amount: parseFloat(manualForm.amount),
+            category: classifyCategory(manualForm.merchant),
+            card: "現金/手動",
+          };
+          await handleSwipe(item, manualForm.type);
+          setShowManualModal(false);
+          setManualForm({ merchant: "", amount: "", type: "shared" });
+        };
+
+        // --- Derived Data ---
+        const monthlyHistory = useMemo(() => {
+          return history.filter((item) => item.monthKey === selectedMonthKey);
+        }, [history, selectedMonthKey]);
+
+        const summary = useMemo(() => {
+          let personalTotal = 0;
+          let sharedTotal = 0;
+          let forHimTotal = 0;
+
+          monthlyHistory.forEach((item) => {
+            if (item.type === "personal") personalTotal += item.amount;
+            if (item.type === "shared") sharedTotal += item.amount;
+            if (item.type === "for_him") forHimTotal += item.amount;
+          });
+
+          return {
+            personalTotal,
+            sharedTotal,
+            forHimTotal,
+            bfOwes: Math.round(sharedTotal / 2 + forHimTotal),
+            myShare: Math.round(sharedTotal / 2 + personalTotal),
+            monthLabel: selectedMonthKey,
+          };
+        }, [monthlyHistory, selectedMonthKey]);
+
+        const chartData = useMemo(() => {
+          const targetType = chartView === "personal" ? "personal" : "shared";
+          const dataMap = {};
+
+          monthlyHistory
+            .filter((i) => i.type === targetType && i.amount > 0)
+            .forEach((item) => {
+              const cat = item.category || "其他";
+              dataMap[cat] = (dataMap[cat] || 0) + item.amount;
+            });
+
+          return Object.keys(dataMap).map((key) => ({
+            name: key,
+            value: dataMap[key],
+          }));
+        }, [monthlyHistory, chartView]);
+
+        // --- Components ---
+        const MonthSelector = () => (
+          // Fix: 1. Added relative to establish positioning context.
+          // Fix: 2. Kept justify-center but ensured select is explicitly opaque (bg-white).
+          <div className="flex items-center justify-center space-x-2 bg-white px-4 py-2 rounded-full shadow-sm mb-4 relative">
+            <Calendar className="w-4 h-4 text-gray-500" />
+            <select
+              value={selectedMonthKey}
+              onChange={(e) => {
+                setSelectedMonthKey(e.target.value);
+                setAiInsight("");
+              }}
+              // 修正：從 bg-transparent 改為 bg-white，避免 iOS 選擇器定位錯誤
+              className="bg-white text-sm font-bold text-gray-700 focus:outline-none"
+            >
+              {availableMonths.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+        );
+
+        const TabButton = ({ id, icon: Icon, label }) => (
+          <button
+            onClick={() => setActiveTab(id)}
+            className={`flex flex-col items-center justify-center w-full py-2 transition-colors ${
+              activeTab === id ? "text-blue-500" : "text-gray-400"
+            }`}
+          >
+            <Icon className="w-6 h-6" />
+            <span className="text-[10px] mt-1 font-medium">{label}</span>
+          </button>
+        );
+
+        if (!user) {
+          return (
+            <div className="flex flex-col h-screen w-full items-center justify-center bg-gray-50">
+              <Loader className="w-8 h-8 animate-spin text-blue-500 mb-2" />
+              <p className="text-gray-500 text-sm">正在連線至資料庫...</p>
+            </div>
+          );
+        }
+
+        return (
+          <div className="flex flex-col h-screen w-full max-w-md mx-auto bg-[#F2F2F7] overflow-hidden font-sans text-slate-900 relative">
+            {/* Navbar */}
+            <div className="bg-white/80 backdrop-blur-md border-b border-gray-200 pt-10 pb-3 px-4 flex justify-between items-center z-20 sticky top-0">
+              <h1 className="text-xl font-bold">
+                {activeTab === "swipe" && "帳單分類"}
+                {activeTab === "summary" && "結算明細"}
+                {activeTab === "analysis" && "花費分析"}
+              </h1>
+              <div className="flex gap-3">
+                {activeTab === "swipe" && (
+                  <>
+                    <button
+                      onClick={() => setShowImportModal(true)}
+                      className="text-blue-500 flex items-center gap-1"
+                    >
+                      <FileText className="w-5 h-5" />
+                      <span className="text-sm font-medium">匯入</span>
+                    </button>
+                    <button
+                      onClick={() => setShowManualModal(true)}
+                      className="text-blue-500"
+                    >
+                      <Plus className="w-6 h-6" />
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto overflow-x-hidden relative p-4 no-scrollbar">
+              {/* SWIPE TAB */}
+              {activeTab === "swipe" && (
+                <div className="h-full flex flex-col items-center justify-center -mt-4">
+                  {queue.length > 0 ? (
+                    <div className="w-full max-w-xs relative h-[420px]">
+                      <div className="absolute top-4 left-4 w-full h-full bg-white rounded-3xl shadow-sm border border-gray-200 opacity-50 transform scale-95 translate-y-2"></div>
+
+                      <div className="absolute top-0 left-0 w-full h-full bg-white rounded-3xl shadow-xl border border-gray-100 flex flex-col items-center justify-between p-6 z-10 transition-all duration-300">
+                        <div className="w-full flex justify-between items-center text-gray-400 text-sm font-medium uppercase tracking-wider">
+                          <span>{queue[0].card}</span>
+                          <span>{queue[0].date}</span>
+                        </div>
+
+                        <div className="flex-1 flex flex-col items-center justify-center text-center w-full">
+                          <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-4 text-3xl">
+                            {queue[0].merchant.includes("Uber")
+                              ? "🍔"
+                              : queue[0].category === "交通"
+                              ? "🚄"
+                              : queue[0].category === "居家"
+                              ? "🏠"
+                              : "🧾"}
+                          </div>
+                          <h2 className="text-xl font-bold text-gray-800 mb-2 line-clamp-3 leading-tight break-words w-full px-2">
+                            {queue[0].merchant}
+                          </h2>
+                          {queue[0].amount < 0 ? (
+                            <span className="text-red-500 text-sm bg-red-50 px-3 py-1 rounded-full font-bold">
+                              退款 / 負項
+                            </span>
+                          ) : (
+                            <span className="text-blue-500 text-xs bg-blue-50 px-3 py-1 rounded-full font-bold">
+                              {queue[0].category}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mb-8">
+                          <span
+                            className={`text-4xl font-bold ${
+                              queue[0].amount < 0
+                                ? "text-green-600"
+                                : "text-slate-900"
+                            }`}
+                          >
+                            ${queue[0].amount.toLocaleString()}
+                          </span>
+                        </div>
+
+                        <div className="w-full grid grid-cols-3 gap-3">
+                          <button
+                            onClick={() => handleSwipe(queue[0], "personal")}
+                            className="flex flex-col items-center justify-center py-3 rounded-2xl bg-red-50 text-red-500 hover:bg-red-100 transition active:scale-95"
+                          >
+                            <User className="w-6 h-6 mb-1" />
+                            <span className="text-xs font-bold">個人</span>
+                          </button>
+                          <button
+                            onClick={() => handleSwipe(queue[0], "for_him")}
+                            className="flex flex-col items-center justify-center py-3 rounded-2xl bg-purple-50 text-purple-600 hover:bg-purple-100 transition active:scale-95"
+                          >
+                            <ArrowLeftRight className="w-6 h-6 mb-1" />
+                            <span className="text-xs font-bold">代墊</span>
+                          </button>
+                          <button
+                            onClick={() => handleSwipe(queue[0], "shared")}
+                            className="flex flex-col items-center justify-center py-3 rounded-2xl bg-green-50 text-green-500 hover:bg-green-100 transition active:scale-95"
+                          >
+                            <Users className="w-6 h-6 mb-1" />
+                            <span className="text-xs font-bold">共同</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-center p-10 bg-white rounded-3xl shadow-sm">
+                      <div className="bg-green-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4 text-green-600">
+                        <Check className="w-10 h-10" />
+                      </div>
+                      <h3 className="text-xl font-bold text-gray-800 mb-2">
+                        全部分類完畢！
+                      </h3>
+                      <p className="text-gray-500">
+                        您可以手動新增或從結算頁面查看詳細資料。
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SUMMARY TAB */}
+              {activeTab === "summary" && (
+                <div className="space-y-4 pb-20">
+                  <MonthSelector />
+
+                  <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-3xl p-6 text-white shadow-lg shadow-blue-200 relative overflow-hidden">
+                    {/* Gemini AI Message Button */}
+                    <button
+                      onClick={generateSettlementMessage}
+                      className="absolute top-4 right-4 bg-white/20 hover:bg-white/30 p-2 rounded-full transition backdrop-blur-sm"
+                      title="AI 產生請款訊息"
+                    >
+                      <Sparkles className="w-5 h-5 text-yellow-300" />
+                    </button>
+
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-blue-100 font-medium text-sm">
+                        男友應付總額
+                      </span>
+                      <Heart className="w-5 h-5 text-blue-200 fill-blue-200" />
+                    </div>
+                    <div className="text-4xl font-bold mb-6">
+                      ${summary.bfOwes.toLocaleString()}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 border-t border-white/20 pt-4">
+                      <div>
+                        <span className="text-xs text-blue-100 block mb-1">
+                          共同花費 (淨額)
+                        </span>
+                        <span className="text-lg font-semibold">
+                          ${summary.sharedTotal.toLocaleString()}
+                        </span>
+                        <div className="text-[10px] text-blue-200 mt-0.5">
+                          一人 $
+                          {Math.round(summary.sharedTotal / 2).toLocaleString()}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-xs text-blue-100 block mb-1">
+                          妳幫他代墊
+                        </span>
+                        <span className="text-lg font-semibold">
+                          ${summary.forHimTotal.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="flex-1 flex flex-col items-center justify-center text-center w-full">
-                    <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-4 text-3xl">
-                       {queue[0].merchant.includes('Uber') ? '🍔' : 
-                        queue[0].category === '交通' ? '🚄' : 
-                        queue[0].category === '居家' ? '🏠' : '🧾'}
+                  <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                    <div className="px-4 py-3 border-b border-gray-100 flex justify-between items-center">
+                      <h3 className="font-bold text-gray-800">分類明細</h3>
+                      <span className="text-xs text-gray-400">
+                        {monthlyHistory.length} 筆資料
+                      </span>
                     </div>
-                    <h2 className="text-xl font-bold text-gray-800 mb-2 line-clamp-3 leading-tight break-words w-full px-2">
-                      {queue[0].merchant}
-                    </h2>
-                    {queue[0].amount < 0 ? (
-                       <span className="text-red-500 text-sm bg-red-50 px-3 py-1 rounded-full font-bold">退款 / 負項</span>
+                    <div className="divide-y divide-gray-100">
+                      {monthlyHistory.map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex justify-between items-center p-4 group"
+                        >
+                          <div className="flex items-center gap-3 overflow-hidden flex-1">
+                            <div
+                              className={`w-2 h-10 shrink-0 rounded-full ${
+                                item.type === "personal"
+                                  ? "bg-red-400"
+                                  : item.type === "shared"
+                                  ? "bg-green-400"
+                                  : "bg-purple-400"
+                              }`}
+                            ></div>
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="font-medium text-gray-900 truncate text-sm"
+                                title={item.merchant}
+                              >
+                                {item.merchant}
+                              </div>
+                              <div className="text-xs text-gray-400 mt-0.5">
+                                {item.date} · {item.card}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right flex items-center gap-3">
+                            <div>
+                              <div className="font-bold text-gray-900">
+                                ${item.amount.toLocaleString()}
+                              </div>
+                              <div
+                                className={`text-[10px] px-2 py-0.5 rounded-md inline-block mt-1 ${
+                                  item.type === "personal"
+                                    ? "bg-red-50 text-red-500"
+                                    : item.type === "shared"
+                                    ? "bg-green-50 text-green-500"
+                                    : "bg-purple-50 text-purple-500"
+                                }`}
+                              >
+                                {item.type === "personal"
+                                  ? "個人"
+                                  : item.type === "shared"
+                                  ? "共同"
+                                  : "代墊"}
+                              </div>
+                            </div>
+                            <button
+                              // 修正：使用自定義 modal 替換 confirm()，但為保持單檔案簡單性，使用 window.confirm
+                              onClick={() => handleDelete(item.id)}
+                              className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {monthlyHistory.length === 0 && (
+                        <div className="p-8 text-center text-gray-400 text-sm">
+                          此月份尚無資料
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ANALYSIS TAB */}
+              {activeTab === "analysis" && (
+                <div className="space-y-4 pb-20">
+                  <MonthSelector />
+
+                  <div className="w-full bg-white p-1 rounded-xl flex shadow-sm">
+                    <button
+                      className={`flex-1 text-center py-2 text-sm font-medium rounded-lg transition ${
+                        chartView === "personal"
+                          ? "bg-blue-500 text-white"
+                          : "text-gray-500 hover:bg-gray-50"
+                      }`}
+                      onClick={() => setChartView("personal")}
+                    >
+                      個人花費
+                    </button>
+                    <button
+                      className={`flex-1 text-center py-2 text-sm font-medium rounded-lg transition ${
+                        chartView === "shared"
+                          ? "bg-green-500 text-white"
+                          : "text-gray-500 hover:bg-gray-50"
+                      }`}
+                      onClick={() => setChartView("shared")}
+                    >
+                      共同花費
+                    </button>
+                  </div>
+
+                  <div className="bg-white rounded-2xl p-6 shadow-sm relative">
+                    <div className="flex justify-between items-center mb-6">
+                      <h3 className="font-bold text-gray-800 text-center flex-1">
+                        {chartView === "personal" ? "個人" : "共同"}花費類別 (
+                        {selectedMonthKey})
+                      </h3>
+                      {/* AI Insight Button */}
+                      {chartData.length > 0 && (
+                        <button
+                          onClick={generateInsight}
+                          disabled={isInsightLoading}
+                          className="absolute right-4 top-4 text-purple-600 hover:bg-purple-50 p-2 rounded-full transition"
+                          title="AI 消費分析"
+                        >
+                          {isInsightLoading ? (
+                            <Loader className="w-5 h-5 animate-spin" />
+                          ) : (
+                            <Wand2 className="w-5 h-5" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* AI Insight Result */}
+                    {aiInsight && (
+                      <div className="mb-6 bg-purple-50 p-3 rounded-xl text-sm text-purple-800 border border-purple-100 animate-in fade-in slide-in-from-top-2">
+                        <div className="flex items-start gap-2">
+                          <Sparkles className="w-4 h-4 shrink-0 mt-0.5" />
+                          <p>{aiInsight}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="h-[250px] w-full">
+                      {/* 僅在 Recharts 模組和資料都準備好時才渲染圖表 */}
+                      {isRechartsReady && chartData.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={chartData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={80}
+                              paddingAngle={5}
+                              dataKey="value"
+                            >
+                              {chartData.map((entry, index) => (
+                                <Cell
+                                  key={`cell-${index}`}
+                                  fill={PIE_COLORS[index % PIE_COLORS.length]}
+                                />
+                              ))}
+                            </Pie>
+                            <Tooltip
+                              formatter={(value) =>
+                                `$${value.toLocaleString()}`
+                              }
+                            />
+                            <Legend />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="h-full flex items-center justify-center text-gray-400">
+                          {isRechartsReady ? "無數據" : "圖表組件載入中..."}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer Nav */}
+            <div className="bg-white/90 backdrop-blur-lg border-t border-gray-200 pb-safe pt-1 px-2 flex justify-around items-center z-20 shrink-0">
+              <TabButton id="swipe" icon={CreditCard} label="分類" />
+              <TabButton id="summary" icon={Wallet} label="結算" />
+              <TabButton id="analysis" icon={PieIcon} label="分析" />
+            </div>
+
+            {/* Import Modal */}
+            {showImportModal && (
+              <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+                <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300 flex flex-col max-h-[90%]">
+                  <div className="flex justify-between items-center mb-4 shrink-0">
+                    <h3 className="font-bold text-lg">匯入帳單明細</h3>
+                    <button
+                      onClick={() => setShowImportModal(false)}
+                      className="p-1 bg-gray-100 rounded-full"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="mb-4 shrink-0">
+                    <label className="text-xs font-bold text-gray-500 ml-1">
+                      卡片名稱
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      placeholder="例如：台新狗狗卡"
+                      value={cardNameInput}
+                      onChange={(e) => setCardNameInput(e.target.value)}
+                    />
+                  </div>
+
+                  <p className="text-sm text-gray-500 mb-3 shrink-0">
+                    請貼上網銀明細。智慧系統會自動合併「折抵」項目，僅顯示淨額。
+                  </p>
+                  <textarea
+                    className="w-full flex-1 min-h-[150px] p-3 bg-gray-50 rounded-xl border-none text-xs focus:ring-2 focus:ring-blue-500 font-mono"
+                    placeholder={`請貼上明細文字...`}
+                    value={rawInput}
+                    onChange={(e) => setRawInput(e.target.value)}
+                  />
+                  <button
+                    onClick={parseBillText}
+                    className="w-full mt-4 bg-blue-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-blue-700 transition shrink-0"
+                  >
+                    智慧解析匯入
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* AI Message Modal */}
+            {showAiModal && (
+              <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+                <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                  <div className="flex justify-between items-center mb-4">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-5 h-5 text-yellow-500" />
+                      <h3 className="font-bold text-lg">AI 撒嬌請款單</h3>
+                    </div>
+                    <button
+                      onClick={() => setShowAiModal(false)}
+                      className="p-1 bg-gray-100 rounded-full"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="bg-yellow-50 p-4 rounded-xl text-sm text-gray-800 leading-relaxed mb-4 min-h-[100px] whitespace-pre-wrap font-medium">
+                    {isAiLoading ? (
+                      <div className="flex flex-col items-center justify-center h-24 text-gray-400 gap-2">
+                        <Loader className="w-6 h-6 animate-spin text-yellow-500" />
+                        <span>正在醞釀可愛語氣...</span>
+                      </div>
                     ) : (
-                       <span className="text-blue-500 text-xs bg-blue-50 px-3 py-1 rounded-full font-bold">{queue[0].category}</span>
+                      aiMessage
                     )}
                   </div>
 
-                  <div className="mb-8">
-                    <span className={`text-4xl font-bold ${queue[0].amount < 0 ? 'text-green-600' : 'text-slate-900'}`}>
-                      ${queue[0].amount.toLocaleString()}
-                    </span>
-                  </div>
-
-                  <div className="w-full grid grid-cols-3 gap-3">
-                    <button 
-                      onClick={() => handleSwipe(queue[0], 'personal')}
-                      className="flex flex-col items-center justify-center py-3 rounded-2xl bg-red-50 text-red-500 hover:bg-red-100 transition active:scale-95"
+                  <div className="flex gap-3">
+                    <button
+                      onClick={generateSettlementMessage}
+                      disabled={isAiLoading}
+                      className="flex-1 py-3 rounded-xl font-bold text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 transition"
                     >
-                      <User size={24} className="mb-1" />
-                      <span className="text-xs font-bold">個人</span>
+                      換個語氣
                     </button>
-                     <button 
-                      onClick={() => handleSwipe(queue[0], 'for_him')}
-                      className="flex flex-col items-center justify-center py-3 rounded-2xl bg-purple-50 text-purple-600 hover:bg-purple-100 transition active:scale-95"
+                    <button
+                      onClick={() => copyToClipboard(aiMessage)}
+                      disabled={isAiLoading || !aiMessage}
+                      className="flex-1 py-3 rounded-xl font-bold text-sm bg-black text-white hover:bg-gray-800 transition flex items-center justify-center gap-2"
                     >
-                      <ArrowLeftRight size={24} className="mb-1" />
-                      <span className="text-xs font-bold">代墊</span>
-                    </button>
-                    <button 
-                      onClick={() => handleSwipe(queue[0], 'shared')}
-                      className="flex flex-col items-center justify-center py-3 rounded-2xl bg-green-50 text-green-500 hover:bg-green-100 transition active:scale-95"
-                    >
-                      <Users size={24} className="mb-1" />
-                      <span className="text-xs font-bold">共同</span>
+                      <Copy className="w-4 h-4" />
+                      複製訊息
                     </button>
                   </div>
                 </div>
               </div>
-            ) : (
-              <div className="text-center p-10 bg-white rounded-3xl shadow-sm">
-                <div className="bg-green-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4 text-green-600">
-                  <Check size={40} />
+            )}
+
+            {/* Manual Modal */}
+            {showManualModal && (
+              <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+                <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="font-bold text-lg">新增手動花費</h3>
+                    <button
+                      onClick={() => setShowManualModal(false)}
+                      className="p-1 bg-gray-100 rounded-full"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-xs font-bold text-gray-500 ml-1">
+                        項目名稱
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="例如：路邊攤晚餐"
+                        value={manualForm.merchant}
+                        onChange={(e) =>
+                          setManualForm({
+                            ...manualForm,
+                            merchant: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-gray-500 ml-1">
+                        金額
+                      </label>
+                      <input
+                        type="number"
+                        className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 text-lg font-bold"
+                        placeholder="0"
+                        value={manualForm.amount}
+                        onChange={(e) =>
+                          setManualForm({
+                            ...manualForm,
+                            amount: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-gray-500 ml-1">
+                        分類
+                      </label>
+                      <div className="grid grid-cols-3 gap-2 mt-1">
+                        <button
+                          onClick={() =>
+                            setManualForm({ ...manualForm, type: "personal" })
+                          }
+                          className={`py-2 rounded-lg text-xs font-bold border transition ${
+                            manualForm.type === "personal"
+                              ? "bg-red-50 border-red-200 text-red-600"
+                              : "border-gray-100 text-gray-400"
+                          }`}
+                        >
+                          個人
+                        </button>
+                        <button
+                          onClick={() =>
+                            setManualForm({ ...manualForm, type: "shared" })
+                          }
+                          className={`py-2 rounded-lg text-xs font-bold border transition ${
+                            manualForm.type === "shared"
+                              ? "bg-green-50 border-green-200 text-green-600"
+                              : "border-gray-100 text-gray-400"
+                          }`}
+                        >
+                          共同
+                        </button>
+                        <button
+                          onClick={() =>
+                            setManualForm({ ...manualForm, type: "for_him" })
+                          }
+                          className={`py-2 rounded-lg text-xs font-bold border transition ${
+                            manualForm.type === "for_him"
+                              ? "bg-purple-50 border-purple-200 text-purple-600"
+                              : "border-gray-100 text-gray-400"
+                          }`}
+                        >
+                          代墊
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleAddManual}
+                    className="w-full mt-8 bg-black text-white py-3 rounded-xl font-bold text-sm hover:bg-gray-800 transition shadow-lg"
+                  >
+                    加入帳單
+                  </button>
                 </div>
-                <h3 className="text-xl font-bold text-gray-800 mb-2">全部分類完畢！</h3>
-                <p className="text-gray-500">您可以在結算頁面查看詳細資料。</p>
               </div>
             )}
           </div>
-        )}
+        );
+      }
 
-        {/* SUMMARY TAB */}
-        {activeTab === 'summary' && (
-          <div className="space-y-4 pb-20">
-            <MonthSelector />
-
-            <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-3xl p-6 text-white shadow-lg shadow-blue-200 relative overflow-hidden">
-               {/* Gemini AI Message Button */}
-               <button 
-                onClick={generateSettlementMessage}
-                className="absolute top-4 right-4 bg-white/20 hover:bg-white/30 p-2 rounded-full transition backdrop-blur-sm"
-                title="AI 產生請款訊息"
-              >
-                <Sparkles size={20} className="text-yellow-300" />
-              </button>
-
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-blue-100 font-medium text-sm">男友應付總額</span>
-                <Heart size={20} className="text-blue-200 fill-blue-200" />
-              </div>
-              <div className="text-4xl font-bold mb-6">
-                ${summary.bfOwes.toLocaleString()}
-              </div>
-              
-              <div className="grid grid-cols-2 gap-4 border-t border-white/20 pt-4">
-                <div>
-                  <span className="text-xs text-blue-100 block mb-1">共同花費 (淨額)</span>
-                  <span className="text-lg font-semibold">${summary.sharedTotal.toLocaleString()}</span>
-                  <div className="text-[10px] text-blue-200 mt-0.5">一人 ${Math.round(summary.sharedTotal/2).toLocaleString()}</div>
-                </div>
-                <div>
-                  <span className="text-xs text-blue-100 block mb-1">妳幫他代墊</span>
-                  <span className="text-lg font-semibold">${summary.forHimTotal.toLocaleString()}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-100 flex justify-between items-center">
-                <h3 className="font-bold text-gray-800">分類明細</h3>
-                <span className="text-xs text-gray-400">{monthlyHistory.length} 筆資料</span>
-              </div>
-              <div className="divide-y divide-gray-100">
-                {monthlyHistory.map((item) => (
-                  <div key={item.id} className="flex justify-between items-center p-4 group">
-                    <div className="flex items-center gap-3 overflow-hidden flex-1">
-                      <div className={`w-2 h-10 shrink-0 rounded-full ${
-                        item.type === 'personal' ? 'bg-red-400' : 
-                        item.type === 'shared' ? 'bg-green-400' : 'bg-purple-400'
-                      }`}></div>
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium text-gray-900 truncate text-sm" title={item.merchant}>
-                            {item.merchant}
-                        </div>
-                        <div className="text-xs text-gray-400 mt-0.5">{item.date} · {item.card}</div>
-                      </div>
-                    </div>
-                    <div className="text-right flex items-center gap-3">
-                      <div>
-                        <div className="font-bold text-gray-900">${item.amount.toLocaleString()}</div>
-                        <div className={`text-[10px] px-2 py-0.5 rounded-md inline-block mt-1 ${
-                            item.type === 'personal' ? 'bg-red-50 text-red-500' : 
-                            item.type === 'shared' ? 'bg-green-50 text-green-500' : 'bg-purple-50 text-purple-500'
-                        }`}>
-                            {item.type === 'personal' ? '個人' : item.type === 'shared' ? '共同' : '代墊'}
-                        </div>
-                      </div>
-                      <button 
-                        onClick={() => handleDelete(item.id)}
-                        className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition"
-                      >
-                          <Trash2 size={16} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-                {monthlyHistory.length === 0 && (
-                    <div className="p-8 text-center text-gray-400 text-sm">
-                        此月份尚無資料
-                    </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ANALYSIS TAB */}
-        {activeTab === 'analysis' && (
-          <div className="space-y-4 pb-20">
-             <MonthSelector />
-             
-             <div className="w-full bg-white p-1 rounded-xl flex shadow-sm">
-                <button 
-                    className={`flex-1 text-center py-2 text-sm font-medium rounded-lg transition ${chartView === 'personal' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:bg-gray-50'}`}
-                    onClick={() => setChartView('personal')}
-                >
-                    個人花費
-                </button>
-                <button 
-                    className={`flex-1 text-center py-2 text-sm font-medium rounded-lg transition ${chartView === 'shared' ? 'bg-green-500 text-white' : 'text-gray-500 hover:bg-gray-50'}`}
-                    onClick={() => setChartView('shared')}
-                >
-                    共同花費
-                </button>
-            </div>
-
-             <div className="bg-white rounded-2xl p-6 shadow-sm relative">
-               
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="font-bold text-gray-800 text-center flex-1">
-                    {chartView === 'personal' ? '個人' : '共同'}花費類別 ({selectedMonthKey})
-                </h3>
-                {/* AI Insight Button */}
-                {chartData.length > 0 && (
-                  <button 
-                    onClick={generateInsight}
-                    disabled={isInsightLoading}
-                    className="absolute right-4 top-4 text-purple-600 hover:bg-purple-50 p-2 rounded-full transition"
-                    title="AI 消費分析"
-                  >
-                    {isInsightLoading ? <Loader size={20} className="animate-spin"/> : <Wand2 size={20} />}
-                  </button>
-                )}
-              </div>
-
-              {/* AI Insight Result */}
-              {aiInsight && (
-                 <div className="mb-6 bg-purple-50 p-3 rounded-xl text-sm text-purple-800 border border-purple-100 animate-in fade-in slide-in-from-top-2">
-                    <div className="flex items-start gap-2">
-                        <Sparkles size={16} className="shrink-0 mt-0.5" />
-                        <p>{aiInsight}</p>
-                    </div>
-                 </div>
-              )}
-
-              <div className="h-[250px] w-full">
-                {chartData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={chartData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {chartData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value) => `$${value}`} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                ) : (
-                   <div className="h-full flex items-center justify-center text-gray-400">
-                     無數據
-                   </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-      </div>
-
-      {/* Footer Nav */}
-      <div className="bg-white/90 backdrop-blur-lg border-t border-gray-200 pb-safe pt-1 px-2 flex justify-around items-center z-20 shrink-0">
-        <TabButton id="swipe" icon={CreditCard} label="分類" />
-        <TabButton id="summary" icon={Wallet} label="結算" />
-        <TabButton id="analysis" icon={PieIcon} label="分析" />
-      </div>
-
-      {/* Import Modal */}
-      {showImportModal && (
-        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
-          <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300 flex flex-col max-h-[90%]">
-            <div className="flex justify-between items-center mb-4 shrink-0">
-              <h3 className="font-bold text-lg">匯入帳單明細</h3>
-              <button onClick={() => setShowImportModal(false)} className="p-1 bg-gray-100 rounded-full"><X size={20}/></button>
-            </div>
-            
-            <div className="mb-4 shrink-0">
-              <label className="text-xs font-bold text-gray-500 ml-1">卡片名稱</label>
-              <input 
-                type="text" 
-                className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 text-sm"
-                placeholder="例如：台新狗狗卡"
-                value={cardNameInput}
-                onChange={(e) => setCardNameInput(e.target.value)}
-              />
-            </div>
-
-            <p className="text-sm text-gray-500 mb-3 shrink-0">
-               請貼上網銀明細。智慧系統會自動合併「折抵」項目，僅顯示淨額。
-            </p>
-            <textarea 
-              className="w-full flex-1 min-h-[150px] p-3 bg-gray-50 rounded-xl border-none text-xs focus:ring-2 focus:ring-blue-500 font-mono"
-              placeholder={`請貼上明細文字...`}
-              value={rawInput}
-              onChange={(e) => setRawInput(e.target.value)}
-            />
-            <button 
-              onClick={parseBillText}
-              className="w-full mt-4 bg-blue-600 text-white py-3 rounded-xl font-bold text-sm hover:bg-blue-700 transition shrink-0"
-            >
-              智慧解析匯入
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* AI Message Modal */}
-      {showAiModal && (
-        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
-          <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
-            <div className="flex justify-between items-center mb-4">
-              <div className="flex items-center gap-2">
-                <Sparkles size={20} className="text-yellow-500" />
-                <h3 className="font-bold text-lg">AI 撒嬌請款單</h3>
-              </div>
-              <button onClick={() => setShowAiModal(false)} className="p-1 bg-gray-100 rounded-full"><X size={20}/></button>
-            </div>
-            
-            <div className="bg-yellow-50 p-4 rounded-xl text-sm text-gray-800 leading-relaxed mb-4 min-h-[100px] whitespace-pre-wrap font-medium">
-              {isAiLoading ? (
-                 <div className="flex flex-col items-center justify-center h-24 text-gray-400 gap-2">
-                    <Loader size={24} className="animate-spin text-yellow-500" />
-                    <span>正在醞釀可愛語氣...</span>
-                 </div>
-              ) : (
-                aiMessage
-              )}
-            </div>
-
-            <div className="flex gap-3">
-              <button 
-                onClick={generateSettlementMessage}
-                disabled={isAiLoading}
-                className="flex-1 py-3 rounded-xl font-bold text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 transition"
-              >
-                換個語氣
-              </button>
-              <button 
-                onClick={() => copyToClipboard(aiMessage)}
-                disabled={isAiLoading || !aiMessage}
-                className="flex-1 py-3 rounded-xl font-bold text-sm bg-black text-white hover:bg-gray-800 transition flex items-center justify-center gap-2"
-              >
-                <Copy size={16} />
-                複製訊息
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Manual Modal */}
-      {showManualModal && (
-        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
-          <div className="bg-white w-full sm:w-10/12 max-w-sm rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="font-bold text-lg">新增手動花費</h3>
-              <button onClick={() => setShowManualModal(false)} className="p-1 bg-gray-100 rounded-full"><X size={20}/></button>
-            </div>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-bold text-gray-500 ml-1">項目名稱</label>
-                <input 
-                  type="text" 
-                  className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="例如：路邊攤晚餐"
-                  value={manualForm.merchant}
-                  onChange={e => setManualForm({...manualForm, merchant: e.target.value})}
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-500 ml-1">金額</label>
-                <input 
-                  type="number" 
-                  className="w-full mt-1 p-3 bg-gray-50 rounded-xl border-none focus:ring-2 focus:ring-blue-500 text-lg font-bold"
-                  placeholder="0"
-                  value={manualForm.amount}
-                  onChange={e => setManualForm({...manualForm, amount: e.target.value})}
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-500 ml-1">分類</label>
-                <div className="grid grid-cols-3 gap-2 mt-1">
-                  <button 
-                    onClick={() => setManualForm({...manualForm, type: 'personal'})}
-                    className={`py-2 rounded-lg text-xs font-bold border transition ${manualForm.type === 'personal' ? 'bg-red-50 border-red-200 text-red-600' : 'border-gray-100 text-gray-400'}`}
-                  >
-                    個人
-                  </button>
-                  <button 
-                    onClick={() => setManualForm({...manualForm, type: 'shared'})}
-                    className={`py-2 rounded-lg text-xs font-bold border transition ${manualForm.type === 'shared' ? 'bg-green-50 border-green-200 text-green-600' : 'border-gray-100 text-gray-400'}`}
-                  >
-                    共同
-                  </button>
-                  <button 
-                    onClick={() => setManualForm({...manualForm, type: 'for_him'})}
-                    className={`py-2 rounded-lg text-xs font-bold border transition ${manualForm.type === 'for_him' ? 'bg-purple-50 border-purple-200 text-purple-600' : 'border-gray-100 text-gray-400'}`}
-                  >
-                    代墊
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <button 
-              onClick={handleAddManual}
-              className="w-full mt-8 bg-black text-white py-3 rounded-xl font-bold text-sm hover:bg-gray-800 transition shadow-lg"
-            >
-              加入帳單
-            </button>
-          </div>
-        </div>
-      )}
-
-    </div>
-  );
-}
+      // 渲染 App
+      const container = document.getElementById("root");
+      const root = ReactDOM.createRoot(container);
+      root.render(<ExpenseSplitterApp />);
+    </script>
+  </body>
+</html>
